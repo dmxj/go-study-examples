@@ -1,0 +1,139 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Go 聊天室</title>
+<link rel="icon" href="data:,">
+<style>
+  * { box-sizing: border-box; }
+  body { margin: 0; font: 14px/1.5 -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif; background: #f3f5f8; color: #222; }
+  header { background: #00add8; color: #fff; padding: 10px 16px; display: flex; gap: 12px; align-items: center; }
+  header h1 { font-size: 18px; margin: 0; flex: 1; }
+  #login, #chat { max-width: 900px; margin: 24px auto; background: #fff; border-radius: 8px; box-shadow: 0 1px 4px rgba(0,0,0,.08); }
+  #login { padding: 24px; display: flex; gap: 8px; flex-wrap: wrap; }
+  #chat { display: none; height: calc(100vh - 110px); grid-template-columns: 1fr 180px; grid-template-rows: 1fr auto; }
+  #messages { overflow-y: auto; padding: 12px 16px; border-right: 1px solid #eee; }
+  #users { padding: 12px; overflow-y: auto; }
+  #users h3 { margin: 0 0 8px; font-size: 13px; color: #888; }
+  #users li { list-style: none; padding: 2px 0; }
+  #users ul { margin: 0; padding: 0; }
+  form#send { grid-column: 1 / 3; display: flex; gap: 8px; padding: 10px; border-top: 1px solid #eee; }
+  input { flex: 1; padding: 8px 10px; border: 1px solid #ccc; border-radius: 4px; font-size: 14px; min-width: 120px; }
+  button { padding: 8px 16px; border: 0; border-radius: 4px; background: #00add8; color: #fff; cursor: pointer; }
+  .msg { margin: 4px 0; word-break: break-word; }
+  .msg .nick { font-weight: 600; color: #007d9c; margin-right: 6px; }
+  .msg .time { color: #aaa; font-size: 12px; margin-right: 6px; }
+  .msg.me .nick { color: #c0392b; }
+  .system { color: #888; font-size: 12px; text-align: center; }
+  .error { color: #c0392b; font-size: 12px; text-align: center; }
+  #status { font-size: 12px; opacity: .9; }
+</style>
+</head>
+<body>
+<header><h1>Go 聊天室</h1><span id="status">未连接</span></header>
+
+<form id="login">
+  <input id="nick" placeholder="昵称（1~20 个字符）" maxlength="20" required>
+  <input id="room" placeholder="房间名（默认 lobby）" pattern="[A-Za-z0-9_\-]{1,32}">
+  <button>进入</button>
+</form>
+
+<div id="chat">
+  <div id="messages"></div>
+  <div id="users"><h3>在线用户</h3><ul id="userlist"></ul></div>
+  <form id="send">
+    <input id="text" placeholder="输入消息，回车发送；/nick 新昵称 可改名，/users 查看在线" autocomplete="off" maxlength="1000">
+    <button>发送</button>
+  </form>
+</div>
+
+<script>
+(() => {
+  const $ = (id) => document.getElementById(id);
+  let ws, myNick, myRoom;
+
+  // 注意：所有用户输入都用 textContent 写入页面，绝不用 innerHTML，防止 XSS。
+  function add(cls, parts) {
+    const div = document.createElement("div");
+    div.className = cls;
+    for (const [c, text] of parts) {
+      const span = document.createElement("span");
+      if (c) span.className = c;
+      span.textContent = text;
+      div.appendChild(span);
+    }
+    const box = $("messages");
+    const atBottom = box.scrollHeight - box.scrollTop - box.clientHeight < 40;
+    box.appendChild(div);
+    if (atBottom) box.scrollTop = box.scrollHeight;
+  }
+
+  function fmt(t) {
+    const d = new Date(t);
+    return d.toLocaleTimeString("zh-CN", { hour12: false });
+  }
+
+  function onMessage(ev) {
+    const m = JSON.parse(ev.data);
+    switch (m.type) {
+      case "chat":
+        add("msg" + (m.nick === myNick ? " me" : ""), [["time", fmt(m.time)], ["nick", m.nick], ["", m.text]]);
+        break;
+      case "system": {
+        const renamed = m.text.match(/^(.+) 改名为 (.+)$/);
+        if (renamed && renamed[1] === myNick) {
+          myNick = renamed[2];
+          $("status").textContent = `房间 ${myRoom} · ${myNick}`;
+        }
+        add("system", [["", m.text]]);
+        break;
+      }
+      case "users": {
+        const ul = $("userlist");
+        ul.replaceChildren(...m.users.map((u) => {
+          const li = document.createElement("li");
+          li.textContent = u === myNick ? u + "（我）" : u;
+          return li;
+        }));
+        break;
+      }
+      case "error":
+        add("error", [["", m.text]]);
+        break;
+    }
+  }
+
+  $("login").addEventListener("submit", (e) => {
+    e.preventDefault();
+    myNick = $("nick").value.trim();
+    const room = myRoom = $("room").value.trim() || "lobby";
+    const proto = location.protocol === "https:" ? "wss:" : "ws:";
+    const url = `${proto}//${location.host}/ws?room=${encodeURIComponent(room)}&nick=${encodeURIComponent(myNick)}`;
+    ws = new WebSocket(url);
+    $("status").textContent = "连接中…";
+    ws.onopen = () => {
+      $("status").textContent = `房间 ${room} · ${myNick}`;
+      $("login").style.display = "none";
+      $("chat").style.display = "grid";
+      $("text").focus();
+    };
+    ws.onmessage = onMessage;
+    ws.onclose = (ev) => {
+      $("status").textContent = "已断开" + (ev.reason ? "：" + ev.reason : "");
+      add("system", [["", "连接已关闭，刷新页面可重新进入"]]);
+      if ($("chat").style.display !== "grid") $("login").style.display = "flex";
+    };
+  });
+
+  $("send").addEventListener("submit", (e) => {
+    e.preventDefault();
+    const text = $("text").value.trim();
+    if (!text || !ws || ws.readyState !== WebSocket.OPEN) return;
+    ws.send(JSON.stringify({ text }));
+    $("text").value = "";
+  });
+})();
+</script>
+</body>
+</html>
